@@ -1,0 +1,22 @@
+[package]
+name = "erebus"
+version = "1.5.9"
+edition = "2024"
+rust-version = "1.88"
+description = "UCI chess engine with NNUE evaluation"
+
+[[bin]]
+name = "erebus"
+path = "src/main.rs"
+
+[dependencies]
+shakmaty = "0.30.1"
+shakmaty-syzygy = "0.28.1"
+sfbinpack = "0.6.5"
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"   # whole-program inlining across crate boundaries
+codegen-units = 1       # no per-unit boundaries limiting LTO / inlining
+panic         = "abort" # no unwinding tables; nothing uses catch_unwind
+debug         = true    # symbols for profiling (perf / flamegraph); no runtime cost

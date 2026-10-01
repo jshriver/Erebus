@@ -1,0 +1,98 @@
+# Builds release binaries for every GitHub-hosted runner platform and attaches
+# them to the release. Runs when a release is published; can also be started by
+# hand (Actions tab -> Release binaries -> Run workflow), which uploads the
+# binaries as workflow artifacts instead.
+#
+# .cargo/config.toml builds for target-cpu=native, which is not portable, so
+# every job overrides it via RUSTFLAGS. x86-64 is built at each
+# microarchitecture level:
+#   x86-64     any 64-bit x86 (NNUE still uses AVX2 via runtime detection)
+#   x86-64-v2  SSE4.2 + POPCNT          (Nehalem / 2009+)
+#   x86-64-v3  AVX2 + BMI2              (Haswell / Zen 1+) -- the usual pick
+#   x86-64-v4  AVX-512                  (Skylake-X / Zen 4+)
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  NAME: erebus
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (22.04 runners: older glibc, so the binaries run on more distros)
+          - { os: linux,   arch: x86-64,    runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  cpu: x86-64,    bench: true }
+          - { os: linux,   arch: x86-64-v2, runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  cpu: x86-64-v2, bench: true }
+          - { os: linux,   arch: x86-64-v3, runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  cpu: x86-64-v3, bench: true }
+          - { os: linux,   arch: x86-64-v4, runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  cpu: x86-64-v4, bench: false }
+          - { os: linux,   arch: aarch64,   runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, cpu: generic,   bench: true }
+          # Windows
+          - { os: windows, arch: x86-64,    runner: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64,    bench: true }
+          - { os: windows, arch: x86-64-v2, runner: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v2, bench: true }
+          - { os: windows, arch: x86-64-v3, runner: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v3, bench: true }
+          - { os: windows, arch: x86-64-v4, runner: windows-latest,   target: x86_64-pc-windows-msvc,    cpu: x86-64-v4, bench: false }
+          - { os: windows, arch: aarch64,   runner: windows-11-arm,   target: aarch64-pc-windows-msvc,   cpu: generic,   bench: true }
+          # macOS (Apple Silicon native; Intel cross-compiled on the same runner)
+          - { os: macos,   arch: apple-silicon, runner: macos-latest, target: aarch64-apple-darwin,      cpu: apple-m1,  bench: true }
+          - { os: macos,   arch: x86-64,    runner: macos-latest,     target: x86_64-apple-darwin,       cpu: x86-64,    bench: false }
+          - { os: macos,   arch: x86-64-v3, runner: macos-latest,     target: x86_64-apple-darwin,       cpu: x86-64-v3, bench: false }
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        env:
+          RUSTFLAGS: -C target-cpu=${{ matrix.cpu }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: pkg
+        run: |
+          if [ "${{ github.event_name }}" = release ]; then
+            version="${{ github.event.release.tag_name }}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          ext=""; [ "${{ matrix.os }}" = windows ] && ext=".exe"
+          asset="${NAME}-${version}-${{ matrix.os }}-${{ matrix.arch }}${ext}"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/erebus${ext}" "dist/${asset}"
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
+
+      # Smoke test (skipped where the runner can't execute the binary).
+      - name: Bench
+        if: matrix.bench
+        run: ./dist/${{ steps.pkg.outputs.asset }} bench
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "dist/${{ steps.pkg.outputs.asset }}" --clobber
+
+      - name: Upload artifact
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.asset }}
+          path: dist/${{ steps.pkg.outputs.asset }}
